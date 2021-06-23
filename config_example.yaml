@@ -1,0 +1,17 @@
+---
+    - name: clickhouse_custom_active_replicas
+      help: This is a help string for clickhouse custom metrics
+      driver: clickhouse
+      timeout: 5s
+      query: "SELECT table, engine, active_replicas from system.replicas"
+      resultField: "active_replicas"
+      labels:
+            somelable: "somevalue"
+    - name: ClickHouseCustomMetrics_merge_rows_read
+      help: This is a help string for clickhouse custom metrics
+      driver: clickhouse
+      timeout: 5s
+      query: "SELECT table, engine, active_replicas from system.replicas"
+      resultField: "active_replicas"
+      labels:
+            somelable: "somevalue"

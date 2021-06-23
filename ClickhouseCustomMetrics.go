@@ -3,98 +3,223 @@ package main
 import (
 	"fmt"
 	_ "github.com/ClickHouse/clickhouse-go"
+	"github.com/caarlos0/env/v6"
 	"github.com/jmoiron/sqlx"
-	"log"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	log "github.com/sirupsen/logrus"
+	"io/ioutil"
+	"net/http"
+	"os/signal"
+	"reflect"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"errors"
+	"gopkg.in/yaml.v2"
 	"os"
 )
 
-type MergesData struct {
-	Database                 string   `db:"database"`
-	Table                    string   `db:"table"`
-	Elapsed                  float64  `db:"elapsed"`
-	Progress                 float64  `db:"progress"`
-	NumParts                 string   `db:"num_parts"`
-	SourcePartNames          []string `db:"source_part_names"`
-	ResultPartName           string   `db:"result_part_name"`
-	SourcePartPaths          []string `db:"source_part_paths"`
-	ResultPartPath           string   `db:"result_part_path"`
-	PartitionID              string   `db:"partition_id"`
-	IsMutation               int      `db:"is_mutation"`
-	TotalSizeBytesCompressed string   `db:"total_size_bytes_compressed"`
-	TotalSizeMarks           string   `db:"total_size_marks"`
-	BytesReadUncompressed    string   `db:"bytes_read_uncompressed"`
-	RowsRead                 string   `db:"rows_read"`
-	BytesWrittenUncompressed string   `db:"bytes_written_uncompressed"`
-	RowsWritten              string   `db:"rows_written"`
-	ColumnsWritten           string   `db:"columns_written"`
-	MemoryUsage              string   `db:"memory_usage"`
-	ThreadID                 string   `db:"thread_id"`
-	MergeType                string   `db:"merge_type"`
-	MergeAlgorithm           string   `db:"merge_algorithm"`
+type Config struct {
+	Name  		string 				`yaml:"name"`
+	Help  		string 				`yaml:"help"`
+	Timeout 	time.Duration		`yaml:"timeout"`
+	Driver      string				`yaml:"driver"`
+	ResultField string				`yaml:"resultField"`
+	Labels  	map[string]string	`yaml:"labels"`
+	Query 		string				`yaml:"query"`
 }
 
-type TableData struct {
-	Database  string `db:"database"`
-	TableName string `db:"table"`
-	ByteSize  int64  `db:"bytes_size"`
-	Rows      int64  `db:"rows"`
+type Options struct {
+	LogType 			 string		  `env:"LOG_TYPE" envDefault:"text"`
+	LogLevel  			 string		  `env:"LOG_LEVEL" envDefault:"info"`
+	ListenPort			 int		  `env:"PORT" envDefault:"9246"`
+	ListenAddr			 string		  `env:"LISTEN_ADDR" envDefault:"localhost"`
+	ClickhouseConnString string       `env:"CLICKHOUSE_CONN_STRING" envDefault:"tcp://127.0.0.1:9000?debug=false"`
+	ConfigFileName		 string		  `env:"CONFIG_FILE"`
+}
+
+func initLog(o *Options) *log.Entry {
+	switch strings.ToLower(o.LogType) {
+	case "text":
+		log.SetFormatter(&log.TextFormatter{
+			ForceColors: true,
+		})
+	case "json":
+		log.SetFormatter(&log.JSONFormatter{})
+
+	default:
+		log.SetFormatter(&log.TextFormatter{
+			ForceColors: true,
+		})
+	}
+
+	switch strings.ToLower(o.LogLevel) {
+	case "debug":
+		log.SetLevel(log.DebugLevel)
+	case "info":
+		log.SetLevel(log.InfoLevel)
+	case "warn":
+		log.SetLevel(log.WarnLevel)
+	case "error":
+		log.SetLevel(log.ErrorLevel)
+	}
+
+	return log.WithField("context", "deploy")
+
+}
+
+func parseOptions() (*Options, error) {
+	options := Options{}
+	if err := env.Parse(&options); err != nil {
+		return nil, err
+	}
+	if options.ConfigFileName == "" {
+		return nil,errors.New("Please provide CONFIG_FILE env")
+	}
+	return &options, nil
+}
+
+func parseConfig(filepath string) ([]Config, error) {
+	cfg := []Config{}
+	config, err := os.Open(filepath) // For read access.
+	if err != nil {
+		return nil,err
+	}
+
+	b,err := ioutil.ReadAll(config)
+	if err != nil {
+		config.Close()
+		return nil,err
+	}
+	config.Close()
+
+	err = yaml.Unmarshal(b,&cfg)
+	if err != nil {
+		return nil,err
+	}
+
+	return cfg,nil
+}
+
+func safeExit(code int) {
+	time.Sleep(3)
+	os.Exit(code)
 }
 
 func main() {
-	var data []MergesData
-	var tables []TableData
-	connstring := os.Getenv("CLICKHOUSE_CONN_STRING")
-	if len(connstring) == 0 {
-		connstring = "tcp://127.0.0.1:9000?debug=false"
-	}
-	connect, err := sqlx.Open("clickhouse", connstring)
+	options,err:= parseOptions()
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	if err := connect.Select(&data, "SELECT * from system.merges"); err != nil {
-		log.Fatal(err)
+	logger := initLog(options)
+	logger.Debugf("Started")
+	logger.Debugf("Parsing config")
+	config,err := parseConfig(options.ConfigFileName)
+	if err != nil {
+		panic(err)
 	}
+	logger.Debugf("Config fileds is %v",config)
 
-	for _, entry := range data {
-		fmt.Printf("ClickHouseCustomMetrics_merge_rows_read{table=\"%s\",partid=\"%s\",mergetype=\"%s\",mergealgo=\"%s\"} %s\n",
-			entry.Table,
-			entry.PartitionID,
-			entry.MergeType,
-			entry.MergeAlgorithm,
-			entry.RowsRead)
-		fmt.Printf("ClickHouseCustomMetrics_merge_rows_written{table=\"%s\",partid=\"%s\",mergetype=\"%s\",mergealgo=\"%s\"} %s\n",
-			entry.Table,
-			entry.PartitionID,
-			entry.MergeType,
-			entry.MergeAlgorithm,
-			entry.RowsWritten)
-		fmt.Printf("ClickHouseCustomMetrics_merge_columns_written{table=\"%s\",partid=\"%s\",mergetype=\"%s\",mergealgo=\"%s\"} %s\n",
-			entry.Table,
-			entry.PartitionID,
-			entry.MergeType,
-			entry.MergeAlgorithm,
-			entry.ColumnsWritten)
-	}
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan,
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGKILL,
+		syscall.SIGQUIT)
 
-	if err := connect.Select(&tables, "SELECT database, table"+
-		", sum(bytes) AS bytes_size, "+
-		"sum(rows) AS rows　"+
-		"FROM system.parts　"+
-		"WHERE active "+
-		"GROUP BY database, table "+
-		"ORDER BY bytes_size DESC;"); err != nil {
-		log.Fatal(err)
-	}
+	// Signal processing
+	go func() {
+		sig := <-sigChan
+		logger.Infof("Exit by signal \"%s\"",sig.String())
+		if sig == syscall.SIGKILL {
+			safeExit(1)
+		} else {
+			safeExit(0)
+		}
+	}()
 
-	for _, entry := range tables {
-		fmt.Printf("ClickHouseCustomMetrics_table_size_bytes{table=\"%s\",database=\"%s\"} %d\n",
-			entry.TableName,
-			entry.Database,
-			entry.ByteSize)
-		fmt.Printf("ClickHouseCustomMetrics_table_size_rows{table=\"%s\",database=\"%s\"} %d\n",
-			entry.TableName,
-			entry.Database,
-			entry.Rows)
-	}
+	logger.Debugf("Creating metrics")
+	for _,metric := range config {
 
+		go func() {
+			var (
+				result       = map[string]interface{}{}
+				isRegistered = false
+			)
+
+			for {
+				// Init and clean labelNames
+				labelNames := []string{}
+
+				// Open connection and make query
+				logger.Debugf("Trying to connect to database %s",options.ClickhouseConnString)
+				connect, err := sqlx.Open(metric.Driver, options.ClickhouseConnString)
+				if err != nil {
+					logger.Errorf("Cannot connect to database. Error: %v",err)
+					return
+				}
+				rows,err := connect.Queryx(metric.Query)
+				if err != nil {
+					logger.Errorf("Cannot make query \"%s\". Error: %v",metric.Query,err)
+					return
+				}
+
+				// Get column names and Init result map
+				tmpLabels,err := rows.Columns()
+				if err != nil {
+					logger.Errorf("Cannot determine columns name. Error: %v",err)
+					return
+				}
+				for _,value := range tmpLabels {
+					if value != metric.ResultField {
+						labelNames = append(labelNames, value)
+					}
+				}
+				for _,item := range labelNames  {
+					result[item] = ""
+				}
+
+				newMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
+					Name: metric.Name,
+					Help: metric.Help,
+					ConstLabels: metric.Labels,
+				},labelNames)
+
+				if isRegistered != true {
+					prometheus.MustRegister(newMetric)
+					isRegistered = true
+				}
+
+				// Fill label values
+				for rows.Next() {
+					labelValues := []string{}
+					err = rows.MapScan(result)
+					if err != nil {
+						logger.Errorf("Cannot scan rows. Error: %v",err)
+						return
+					}
+					logger.Debugf("Result is %v",result)
+					logger.Debugf("Result field is %s",metric.ResultField)
+					logger.Debugf("Type of result: %T",reflect.TypeOf(result[metric.ResultField]))
+					for _,value := range labelNames {
+						if value != metric.ResultField {
+							labelValues = append(labelValues, fmt.Sprint(result[value]))
+						}
+					}
+					newMetric.WithLabelValues(labelValues...).Add(float64(result[metric.ResultField].(uint8)))
+				}
+
+				connect.Close()
+				time.Sleep(metric.Timeout)
+			}
+		}()
+
+	}
+	log.Infof("Starting listen on %s:%d",options.ListenAddr,options.ListenPort)
+	http.Handle("/metrics", promhttp.Handler())
+	http.ListenAndServe(options.ListenAddr+":"+strconv.Itoa(options.ListenPort), nil)
 }
