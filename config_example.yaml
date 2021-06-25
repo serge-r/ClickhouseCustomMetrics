@@ -1,17 +1,27 @@
 ---
-    - name: clickhouse_custom_active_replicas
-      help: This is a help string for clickhouse custom metrics
-      driver: clickhouse
-      timeout: 5s
-      query: "SELECT table, engine, active_replicas from system.replicas"
-      resultField: "active_replicas"
-      labels:
-            somelable: "somevalue"
+    driver: clickhouse
+    metrics:
     - name: ClickHouseCustomMetrics_merge_rows_read
-      help: This is a help string for clickhouse custom metrics
-      driver: clickhouse
-      timeout: 5s
-      query: "SELECT table, engine, active_replicas from system.replicas"
-      resultField: "active_replicas"
+      help: Counf of readed rows from merge process
+      timeout: 3s
+      query: "SELECT table, merge_type, merge_algorithm, rows_read from system.merges"
+      metricType: counter
+      resultField: "rows_read"
       labels:
-            somelable: "somevalue"
+            app: "clickhouse"
+    - name: ClickHouseCustomMetrics_merge_rows_written
+      help: Counf of readed rows from merge process
+      timeout: 3s
+      query: "SELECT table, merge_type, merge_algorithm, rows_written from system.merges"
+      metricType: counter
+      resultField: "rows_written"
+      labels:
+        app: "clickhouse"
+    - name: ClickHouseCustomMetrics_merge_columns_written
+      help: Counf of readed rows from merge process
+      timeout: 3s
+      query: "SELECT table, merge_type, merge_algorithm, columns_written from system.merges"
+      metricType: counter
+      resultField: "columns_written"
+      labels:
+        app: "clickhouse"
